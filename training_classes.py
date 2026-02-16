@@ -468,14 +468,14 @@ class EnhancedTrainer:
         real_labels = torch.ones(batch_size, 1).to(self.device) * 0.9
         fake_labels = torch.ones(batch_size, 1).to(self.device) * 0.1
 
-        d_loss, g_loss = 0, 0
+        d_loss, g_tot_loss, g_adv_loss, g_cont_loss = 0, 0
 
         if step % self.d_train_freq == 0:
             d_loss = self.train_discriminator(low_res, high_res, real_labels, fake_labels)
         if step % self.g_train_freq == 0:
-            g_loss = self.train_generator(low_res, high_res, real_labels)
+            g_tot_loss, g_adv_loss, g_cont_loss = self.train_generator(low_res, high_res, real_labels)
 
-        return d_loss, g_loss
+        return d_loss, g_tot_loss, g_adv_loss, g_cont_loss
 
     def train_discriminator(self, low_res, high_res, real_labels, fake_labels):
         self.d_optimizer.zero_grad()
@@ -513,7 +513,7 @@ class EnhancedTrainer:
         torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
         self.g_optimizer.step()
 
-        return g_loss.item()
+        return g_loss.item(), adversarial_loss.item(), content_loss.item()
 
     def print_loss_summary(self, epoch):
         """Print detailed loss breakdown"""
