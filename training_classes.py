@@ -208,25 +208,17 @@ class PixelLoss(nn.Module):
 class PerceptualLoss(nn.Module):
     def __init__(self):
         super(PerceptualLoss, self).__init__()
-
-        # load in an existing model
-        vgg = models.vgg16(pretrained=True).features
-        # create a representation model from the existing model by only using a subset of layers
-        self.feature_extractor = nn.Sequential(*list(vgg.children())[:16])
-
+        vgg = models.vgg16(pretrained=True)
+        self.feature_extractor = nn.Sequential(*list(vgg.features)[:16])
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
-
         self.mse_loss = nn.MSELoss()
 
     def forward(self, generated, target):
-        # convert black and white images to psuedo color images
-        # (go from 1 to 3 channels)
-        def forward(self, generated, target):
-        # Only repeat if the input is grayscale (1 channel)
+        # EVERYTHING BELOW THIS MUST BE INDENTED AT LEAST 8 SPACES
         if generated.size(1) == 1:
             generated = generated.repeat(1, 3, 1, 1)
-            target = target.repeat(1, 3, 1, 1) # <--- Fixed: now inside the if-block
+            target = target.repeat(1, 3, 1, 1) # This fix from earlier should also be indented
 
         gen_features = self.feature_extractor(generated)
         target_features = self.feature_extractor(target)
