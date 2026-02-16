@@ -83,7 +83,7 @@ class FrequencyLoss(nn.Module):
 
 class StructuralSimilarityLoss(nn.Module):
     """SSIM loss for structural preservation"""
-    def __init__(self, window_size=11, sigma=1.5, channels=1):
+    def __init__(self, window_size=11, sigma=1.5, channels=3): 
         super(StructuralSimilarityLoss, self).__init__()
         self.window_size = window_size
         self.sigma = sigma
@@ -208,23 +208,17 @@ class PixelLoss(nn.Module):
 class PerceptualLoss(nn.Module):
     def __init__(self):
         super(PerceptualLoss, self).__init__()
-
-        # load in an existing model
-        vgg = models.vgg16(pretrained=True).features
-        # create a representation model from the existing model by only using a subset of layers
-        self.feature_extractor = nn.Sequential(*list(vgg.children())[:16])
-
+        vgg = models.vgg16(pretrained=True)
+        self.feature_extractor = nn.Sequential(*list(vgg.features)[:16])
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
-
         self.mse_loss = nn.MSELoss()
 
     def forward(self, generated, target):
-        # convert black and white images to psuedo color images
-        # (go from 1 to 3 channels)
+        # EVERYTHING BELOW THIS MUST BE INDENTED AT LEAST 8 SPACES
         if generated.size(1) == 1:
-            generated = generated.repeat(1,3,1,1)
-        target = target.repeat(1,3,1,1)
+            generated = generated.repeat(1, 3, 1, 1)
+            target = target.repeat(1, 3, 1, 1) # This fix from earlier should also be indented
 
         gen_features = self.feature_extractor(generated)
         target_features = self.feature_extractor(target)
@@ -500,11 +494,11 @@ class EnhancedTrainer:
         adversarial_loss = self.adversarial_criterion(fake_pred, real_labels)
 
         # Content loss with detailed reporting
+        pixel_loss = perceptual_loss = 0 # Move initialization to the top
         if self.loss_type == 'combined':
             content_loss, pixel_loss, perceptual_loss = self.content_loss(fake_images, high_res)
         else:
             content_loss = self.content_loss(fake_images, high_res)
-        pixel_loss = perceptual_loss = 0
 
         # Total generator loss
         g_loss = adversarial_loss + self.content_weight * content_loss
