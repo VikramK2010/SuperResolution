@@ -83,7 +83,7 @@ class FrequencyLoss(nn.Module):
 
 class StructuralSimilarityLoss(nn.Module):
     """SSIM loss for structural preservation"""
-    def __init__(self, window_size=11, sigma=1.5, channels=1):
+    def __init__(self, window_size=11, sigma=1.5, channels=3): 
         super(StructuralSimilarityLoss, self).__init__()
         self.window_size = window_size
         self.sigma = sigma
@@ -222,9 +222,11 @@ class PerceptualLoss(nn.Module):
     def forward(self, generated, target):
         # convert black and white images to psuedo color images
         # (go from 1 to 3 channels)
+        def forward(self, generated, target):
+        # Only repeat if the input is grayscale (1 channel)
         if generated.size(1) == 1:
-            generated = generated.repeat(1,3,1,1)
-        target = target.repeat(1,3,1,1)
+            generated = generated.repeat(1, 3, 1, 1)
+            target = target.repeat(1, 3, 1, 1) # <--- Fixed: now inside the if-block
 
         gen_features = self.feature_extractor(generated)
         target_features = self.feature_extractor(target)
@@ -500,11 +502,11 @@ class EnhancedTrainer:
         adversarial_loss = self.adversarial_criterion(fake_pred, real_labels)
 
         # Content loss with detailed reporting
+        pixel_loss = perceptual_loss = 0 # Move initialization to the top
         if self.loss_type == 'combined':
             content_loss, pixel_loss, perceptual_loss = self.content_loss(fake_images, high_res)
         else:
             content_loss = self.content_loss(fake_images, high_res)
-        pixel_loss = perceptual_loss = 0
 
         # Total generator loss
         g_loss = adversarial_loss + self.content_weight * content_loss
