@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 import numpy as np
+from gan_utils import relativistic_discriminator_loss, relativistic_generator_loss
 
 
 # ============================================================================
@@ -183,27 +184,22 @@ class AgriculturalDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
 
             spectral_norm_conv(64, 128, 4, 2, 1),
-            nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
             spectral_norm_conv(128, 256, 4, 2, 1),
-            nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
             spectral_norm_conv(256, 512, 4, 2, 1),
-            nn.BatchNorm2d(512),
             nn.LeakyReLU(0.2, inplace=True),
 
             SelfAttention(512),
 
             spectral_norm_conv(512, 1024, 4, 2, 1),
-            nn.BatchNorm2d(1024),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.utils.spectral_norm(nn.Linear(1024, 1)),
-            nn.Sigmoid(),
         )
 
     def forward(self, x):
@@ -441,17 +437,15 @@ class AgriculturalTrainer:
         self.discriminator = discriminator
         self.device = device
 
-        # Adaptive learning rates
-        self.g_lr = 0.0002
-        self.d_lr = 0.0002
-        self.d_train_freq = 1
-        self.g_train_freq = 1
+        # TTUR: discriminator gets 4x learning rate
+        self.g_lr = 1e-4
+        self.d_lr = 4e-4
         self.d_loss_history = []
         self.g_loss_history = []
 
-        # Loss functions
-        self.adversarial_criterion = nn.BCELoss()
-        self.content_weight = 60.0  # Balanced weight for agricultural images
+        # Loss weights
+        self.adversarial_weight = 0.01
+        self.content_weight = 1.0
 
         # Agricultural-specific loss
         self.content_loss = AgriculturalCombinedLoss().to(device)
@@ -462,15 +456,19 @@ class AgriculturalTrainer:
         self.texture_loss_history = []
         self.ssim_loss_history = []
 
-        self.update_optimizers()
-
-    def update_optimizers(self):
+        # Optimizers (created once, TTUR betas)
         self.g_optimizer = torch.optim.Adam(
-            self.generator.parameters(), lr=self.g_lr, betas=(0.5, 0.999)
+            self.generator.parameters(), lr=self.g_lr, betas=(0.9, 0.999)
         )
         self.d_optimizer = torch.optim.Adam(
-            self.discriminator.parameters(), lr=self.d_lr, betas=(0.5, 0.999)
+            self.discriminator.parameters(), lr=self.d_lr, betas=(0.9, 0.999)
         )
+
+        # Optional cosine annealing schedulers
+        self.g_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.g_optimizer, T_max=total_epochs)
+        self.d_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.d_optimizer, T_max=total_epochs)
 
     def update_loss_weights(self, epoch):
         """Update agricultural-specific loss weights"""
@@ -481,78 +479,43 @@ class AgriculturalTrainer:
         print(f"Agricultural weights - Pixel:{pixel_w:.2f} Color:{color_w:.2f} "
               f"Texture:{texture_w:.2f} SSIM:{ssim_w:.2f} Perceptual:{perceptual_w:.2f}")
 
-    def adapt_training_schedule(self, d_loss, g_loss):
-        """Adaptive training schedule"""
-        self.d_loss_history.append(d_loss)
-        self.g_loss_history.append(g_loss)
-
-        if len(self.d_loss_history) < 10:
-            return
-
-        recent_d_loss = np.mean(self.d_loss_history[-10:])
-        recent_g_loss = np.mean(self.g_loss_history[-10:])
-        loss_ratio = recent_d_loss / (recent_g_loss + 1e-8)
-
-        if loss_ratio < 0.5:
-            self.d_train_freq = 2
-            self.g_train_freq = 1
-            self.d_lr *= 0.95
-            self.g_lr *= 1.05
-            print("Adapting: Discriminator too strong")
-        elif loss_ratio > 2.0:
-            self.d_train_freq = 1
-            self.g_train_freq = 2
-            self.d_lr *= 1.05
-            self.g_lr *= 0.95
-            print("Adapting: Generator too strong")
-        else:
-            self.d_train_freq = 1
-            self.g_train_freq = 1
-
-        self.update_optimizers()
+    def step_schedulers(self):
+        """Step LR schedulers at end of each epoch."""
+        self.g_scheduler.step()
+        self.d_scheduler.step()
 
     def train_step(self, low_res, high_res, step):
         """Single training step"""
-        batch_size = low_res.size(0)
-        real_labels = torch.ones(batch_size, 1).to(self.device) * 0.9
-        fake_labels = torch.ones(batch_size, 1).to(self.device) * 0.1
-
-        d_loss, g_tot_loss, g_adv_loss, g_cont_loss = 0, 0, 0, 0
-
-        if step % self.d_train_freq == 0:
-            d_loss = self.train_discriminator(low_res, high_res, real_labels, fake_labels)
-        if step % self.g_train_freq == 0:
-            g_tot_loss, g_adv_loss, g_cont_loss = self.train_generator(low_res, high_res, real_labels)
-
+        d_loss = self.train_discriminator(low_res, high_res)
+        g_tot_loss, g_adv_loss, g_cont_loss = self.train_generator(low_res, high_res)
         return d_loss, g_tot_loss, g_adv_loss, g_cont_loss
 
-    def train_discriminator(self, low_res, high_res, real_labels, fake_labels):
-        """Train discriminator"""
+    def train_discriminator(self, low_res, high_res):
+        """Train discriminator with RaGAN loss"""
         self.d_optimizer.zero_grad()
-        
-        real_pred = self.discriminator(high_res)
-        d_real_loss = self.adversarial_criterion(real_pred, real_labels)
-        
+
         fake_images = self.generator(low_res)
-        fake_pred = self.discriminator(fake_images.detach())
-        d_fake_loss = self.adversarial_criterion(fake_pred, fake_labels)
-        
-        d_loss = d_real_loss + d_fake_loss
+        real_logits = self.discriminator(high_res)
+        fake_logits = self.discriminator(fake_images.detach())
+
+        d_loss = relativistic_discriminator_loss(real_logits, fake_logits)
         d_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
         self.d_optimizer.step()
-        
+
         return d_loss.item()
 
-    def train_generator(self, low_res, high_res, real_labels):
-        """Train generator"""
+    def train_generator(self, low_res, high_res):
+        """Train generator with RaGAN loss"""
         self.g_optimizer.zero_grad()
 
         fake_images = self.generator(low_res)
 
-        # Adversarial loss
-        fake_pred = self.discriminator(fake_images)
-        adversarial_loss = self.adversarial_criterion(fake_pred, real_labels)
+        # RaGAN adversarial loss (needs both real and fake logits)
+        with torch.no_grad():
+            real_logits = self.discriminator(high_res)
+        fake_logits = self.discriminator(fake_images)
+        adversarial_loss = relativistic_generator_loss(real_logits, fake_logits)
 
         # Agricultural content loss with detailed breakdown
         losses = self.content_loss(fake_images, high_res)
@@ -564,8 +527,7 @@ class AgriculturalTrainer:
         self.ssim_loss_history.append(ssim_loss.item())
 
         # Total generator loss
-        weighted_content_loss = self.content_weight * content_loss
-        g_total_loss = adversarial_loss + weighted_content_loss
+        g_total_loss = self.adversarial_weight * adversarial_loss + self.content_weight * content_loss
 
         g_total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)

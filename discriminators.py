@@ -56,28 +56,23 @@ class SpectralNormDiscriminator(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
 
             spectral_norm_conv(64, 128, 4, 2, 1),
-            nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
             spectral_norm_conv(128, 256, 4, 2, 1),
-            nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
             spectral_norm_conv(256, 512, 4, 2, 1),
-            nn.BatchNorm2d(512),
             nn.LeakyReLU(0.2, inplace=True),
 
             # Self-attention at this resolution
             SelfAttention(512),
 
             spectral_norm_conv(512, 1024, 4, 2, 1),
-            nn.BatchNorm2d(1024),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.utils.spectral_norm(nn.Linear(1024, 1)),
-          	nn.Sigmoid(),
         )
 
     def forward(self, x):

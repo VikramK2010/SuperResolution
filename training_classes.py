@@ -14,6 +14,7 @@ import torchvision.models as models
 from torch import nn, optim
 from scipy import ndimage
 import cv2
+from gan_utils import relativistic_discriminator_loss, relativistic_generator_loss
 
 
 # Medical-specific loss functions
@@ -389,17 +390,15 @@ class EnhancedTrainer:
         self.discriminator = discriminator
         self.device = device
 
-        # Adaptive learning rates
-        self.g_lr = 0.0002
-        self.d_lr = 0.0002
-        self.d_train_freq = 1
-        self.g_train_freq = 1
+        # TTUR: discriminator gets 4x learning rate
+        self.g_lr = 1e-4
+        self.d_lr = 4e-4
         self.d_loss_history = []
         self.g_loss_history = []
 
-        # Loss functions
-        self.adversarial_criterion = nn.BCELoss()
-        self.content_weight = 100.0
+        # Loss weights
+        self.adversarial_weight = 0.01
+        self.content_weight = 1.0
 
         # Initialize content loss based on type
         if loss_type == 'pixel':
@@ -410,98 +409,71 @@ class EnhancedTrainer:
             self.loss_scheduler = None
         elif loss_type == 'combined':
             self.content_loss = CombinedLoss(pixel_weight=1.0, perceptual_weight=0.1).to(device)
-        self.loss_scheduler = LossWeightScheduler(total_epochs=total_epochs)
+            self.loss_scheduler = LossWeightScheduler(total_epochs=total_epochs)
 
         self.loss_type = loss_type
-        self.update_optimizers()
 
-    def update_optimizers(self):
+        # Optimizers (created once, TTUR betas)
         self.g_optimizer = optim.Adam(self.generator.parameters(),
-                                      lr=self.g_lr, betas=(0.5, 0.999))
+                                      lr=self.g_lr, betas=(0.9, 0.999))
         self.d_optimizer = optim.Adam(self.discriminator.parameters(),
-                                      lr=self.d_lr, betas=(0.5, 0.999))
+                                      lr=self.d_lr, betas=(0.9, 0.999))
+
+        # Optional cosine annealing schedulers
+        self.g_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.g_optimizer, T_max=total_epochs)
+        self.d_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.d_optimizer, T_max=total_epochs)
 
     def update_loss_weights(self, epoch):
         """Update loss weights if using combined loss"""
         if self.loss_type == 'combined' and self.loss_scheduler:
             pixel_weight, perceptual_weight = self.loss_scheduler.get_weights(epoch)
-        self.content_loss.update_weights(pixel_weight, perceptual_weight)
-        print(f"Updated weights - Pixel: {pixel_weight:.3f}, Perceptual: {perceptual_weight:.3f}")
+            self.content_loss.update_weights(pixel_weight, perceptual_weight)
+            print(f"Updated weights - Pixel: {pixel_weight:.3f}, Perceptual: {perceptual_weight:.3f}")
 
-    def adapt_training_schedule(self, d_loss, g_loss):
-        self.d_loss_history.append(d_loss)
-        self.g_loss_history.append(g_loss)
-
-        if len(self.d_loss_history) < 10:
-            return
-
-        recent_d_loss = np.mean(self.d_loss_history[-10:])
-        recent_g_loss = np.mean(self.g_loss_history[-10:])
-        loss_ratio = recent_d_loss / (recent_g_loss + 1e-8)
-
-        if loss_ratio < 0.5:
-            self.d_train_freq = 2
-            self.g_train_freq = 1
-            self.d_lr *= 0.95
-            self.g_lr *= 1.05
-            print("Adapting: Discriminator too strong")
-        elif loss_ratio > 2.0:
-            self.d_train_freq = 1
-            self.g_train_freq = 2
-            self.d_lr *= 1.05
-            self.g_lr *= 0.95
-            print("Adapting: Generator too strong")
-        else:
-            self.d_train_freq = 1
-            self.g_train_freq = 1
-
-        self.update_optimizers()
+    def step_schedulers(self):
+        """Step LR schedulers at end of each epoch."""
+        self.g_scheduler.step()
+        self.d_scheduler.step()
 
     def train_step(self, low_res, high_res, step):
-        batch_size = low_res.size(0)
-        real_labels = torch.ones(batch_size, 1).to(self.device) * 0.9
-        fake_labels = torch.ones(batch_size, 1).to(self.device) * 0.1
-
-        d_loss, g_tot_loss, g_adv_loss, g_cont_loss = 0, 0
-
-        if step % self.d_train_freq == 0:
-            d_loss = self.train_discriminator(low_res, high_res, real_labels, fake_labels)
-        if step % self.g_train_freq == 0:
-            g_tot_loss, g_adv_loss, g_cont_loss = self.train_generator(low_res, high_res, real_labels)
-
+        d_loss = self.train_discriminator(low_res, high_res)
+        g_tot_loss, g_adv_loss, g_cont_loss = self.train_generator(low_res, high_res)
         return d_loss, g_tot_loss, g_adv_loss, g_cont_loss
 
-    def train_discriminator(self, low_res, high_res, real_labels, fake_labels):
+    def train_discriminator(self, low_res, high_res):
         self.d_optimizer.zero_grad()
-        real_pred = self.discriminator(high_res)
-        d_real_loss = self.adversarial_criterion(real_pred, real_labels)
+
         fake_images = self.generator(low_res)
-        fake_pred = self.discriminator(fake_images.detach())
-        d_fake_loss = self.adversarial_criterion(fake_pred, fake_labels)
-        d_loss = d_real_loss + d_fake_loss
+        real_logits = self.discriminator(high_res)
+        fake_logits = self.discriminator(fake_images.detach())
+
+        d_loss = relativistic_discriminator_loss(real_logits, fake_logits)
         d_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
         self.d_optimizer.step()
         return d_loss.item()
 
-    def train_generator(self, low_res, high_res, real_labels):
+    def train_generator(self, low_res, high_res):
         self.g_optimizer.zero_grad()
 
         fake_images = self.generator(low_res)
 
-        # Adversarial loss
-        fake_pred = self.discriminator(fake_images)
-        adversarial_loss = self.adversarial_criterion(fake_pred, real_labels)
+        # RaGAN adversarial loss (needs both real and fake logits)
+        with torch.no_grad():
+            real_logits = self.discriminator(high_res)
+        fake_logits = self.discriminator(fake_images)
+        adversarial_loss = relativistic_generator_loss(real_logits, fake_logits)
 
-        # Content loss with detailed reporting
-        pixel_loss = perceptual_loss = 0 # Move initialization to the top
+        # Content loss
         if self.loss_type == 'combined':
-            content_loss, pixel_loss, perceptual_loss = self.content_loss(fake_images, high_res)
+            content_loss, _, _ = self.content_loss(fake_images, high_res)
         else:
             content_loss = self.content_loss(fake_images, high_res)
 
         # Total generator loss
-        g_loss = adversarial_loss + self.content_weight * content_loss
+        g_loss = self.adversarial_weight * adversarial_loss + self.content_weight * content_loss
 
         g_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)
@@ -547,28 +519,16 @@ class MedicalTrainer(EnhancedTrainer):
         print(f"Medical weights - Pixel:{pixel_w:.2f} Edge:{edge_w:.2f} "
               f"Freq:{freq_w:.2f} SSIM:{ssim_w:.2f} Perceptual:{perceptual_w:.2f}")
 
-    def train_step(self, low_res, high_res, step):
-        batch_size = low_res.size(0)
-        real_labels = torch.ones(batch_size, 1).to(self.device) * 0.9
-        fake_labels = torch.ones(batch_size, 1).to(self.device) * 0.1
-
-        d_loss, g_tot_loss, g_adv_loss, g_cont_loss = 0, 0, 0, 0
-
-        if step % self.d_train_freq == 0:
-            d_loss = self.train_discriminator(low_res, high_res, real_labels, fake_labels)
-        if step % self.g_train_freq == 0:
-            g_tot_loss, g_adv_loss, g_cont_loss = self.train_generator(low_res, high_res, real_labels)
-
-        return d_loss, g_tot_loss, g_adv_loss, g_cont_loss
-
-    def train_generator(self, low_res, high_res, real_labels):
+    def train_generator(self, low_res, high_res):
         self.g_optimizer.zero_grad()
 
         fake_images = self.generator(low_res)
 
-        # Adversarial loss
-        fake_pred = self.discriminator(fake_images)
-        adversarial_loss = self.adversarial_criterion(fake_pred, real_labels)
+        # RaGAN adversarial loss
+        with torch.no_grad():
+            real_logits = self.discriminator(high_res)
+        fake_logits = self.discriminator(fake_images)
+        adversarial_loss = relativistic_generator_loss(real_logits, fake_logits)
 
         # Medical content loss with detailed breakdown
         losses = self.content_loss(fake_images, high_res)
@@ -580,8 +540,7 @@ class MedicalTrainer(EnhancedTrainer):
         self.ssim_loss_history.append(ssim_loss.item())
 
         # Total generator loss
-        weighted_content_loss = self.content_weight * content_loss
-        g_total_loss = adversarial_loss + weighted_content_loss
+        g_total_loss = self.adversarial_weight * adversarial_loss + self.content_weight * content_loss
 
         g_total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=1.0)

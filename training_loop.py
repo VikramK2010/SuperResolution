@@ -11,6 +11,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.data import DataLoader
 from training_utils import visualize_results, visualize_results_rgb
+from gan_utils import EMAModel
 import time
 import wandb
 
@@ -27,21 +28,23 @@ import wandb
 #                                         model_name="agricultural_gen_and_dis_model")
 
 # for EnhancedTrainer based trainer classes
-def enhanced_training_loop(dataset, 
-                           dataloader, 
-                           Trainer, 
-                           Generator, 
-                           Discriminator, 
-                           residual_blocks_list=[4], 
-                           visualize=True, 
-                           rbg=True, 
+def enhanced_training_loop(dataset,
+                           dataloader,
+                           Trainer,
+                           Generator,
+                           Discriminator,
+                           residual_blocks_list=[4],
+                           visualize=True,
+                           rbg=True,
                            checkpoint_dir="checkpoints",
                            model_name="enhanced_model",
                            num_epochs_per_block=5,
                            total_epochs=10,
+                           pretrain_epochs=0,
                            wandb_project_name=None,
                            wandb_entity=None,
-                           use_wandb=False):
+                           use_wandb=False,
+                           **trainer_kwargs):
 
     if os.path.exists(checkpoint_dir) == False:
         os.makedirs(checkpoint_dir)
@@ -83,17 +86,36 @@ def enhanced_training_loop(dataset,
         generator = Generator(num_residual_blocks=num_blocks).to(device)
         discriminator = Discriminator().to(device)
 
-        trainer = Trainer(generator, discriminator, device, total_epochs=total_epochs)
+        trainer = Trainer(generator, discriminator, device, total_epochs=total_epochs, **trainer_kwargs)
 
         if use_wandb:
             wandb.watch(generator, log="all", log_freq=100, log_graph=True)
             wandb.watch(discriminator, log="all", log_freq=100, log_graph=True)
 
         # reload from latest checkpoint if available
-        start_epoch = load_latest_checkpoint(generator, discriminator, 
-                                            trainer.g_optimizer, trainer.d_optimizer, trainer, 
+        start_epoch = load_latest_checkpoint(generator, discriminator,
+                                            trainer.g_optimizer, trainer.d_optimizer, trainer,
                                             checkpoint_dir=checkpoint_dir,
                                             model_name=model_name)
+
+        # EMA for generator weight averaging
+        ema = EMAModel(generator)
+
+        # Content-only pre-training phase
+        if pretrain_epochs > 0 and start_epoch == 0:
+            print(f"Pre-training generator for {pretrain_epochs} content-only epochs...")
+            for pt_epoch in range(pretrain_epochs):
+                for low_res, high_res in dataloader:
+                    low_res, high_res = low_res.to(device), high_res.to(device)
+                    trainer.g_optimizer.zero_grad()
+                    fake = generator(low_res)
+                    content_loss = trainer.content_loss(fake, high_res)
+                    if isinstance(content_loss, tuple):
+                        content_loss = content_loss[0]
+                    content_loss.backward()
+                    trainer.g_optimizer.step()
+                    ema.update(generator)
+                print(f"  Pre-train epoch {pt_epoch+1}/{pretrain_epochs} done (content loss: {content_loss.item():.4f})")
 
         num_epochs = num_epochs_per_block
         step = 0
@@ -113,15 +135,15 @@ def enhanced_training_loop(dataset,
                 low_res, high_res = low_res.to(device), high_res.to(device)
                 d_loss, g_total_loss, g_adv_loss, g_content_loss = trainer.train_step(low_res, high_res, step)
 
+                # Update EMA after generator step
+                ema.update(generator)
+
                 epoch_d_loss += d_loss
                 epoch_g_total += g_total_loss
                 epoch_g_adv += g_adv_loss
                 epoch_g_content += g_content_loss
                 num_batches += 1
                 step += 1
-
-                if d_loss > 0 and g_adv_loss > 0 and g_content_loss > 0:
-                    trainer.adapt_training_schedule(d_loss, g_adv_loss)
 
                 if use_wandb and batch_idx % 10 == 0:
                     wandb.log({
@@ -157,20 +179,25 @@ def enhanced_training_loop(dataset,
             # avg_g_content = epoch_g_content / num_batches
             trainer.print_loss_summary(epoch)
 
+            # Step LR schedulers
+            if hasattr(trainer, 'step_schedulers'):
+                trainer.step_schedulers()
+
             epoch_losses.append(avg_g_total)
 
             # Save checkpoint after EVERY epoch
-            save_checkpoint(epoch, generator, discriminator, 
+            save_checkpoint(epoch, generator, discriminator,
                             trainer.g_optimizer, trainer.d_optimizer, trainer,
-                            metrics={'d_loss': d_loss, 
-                                    'g_total_loss': g_total_loss, 
-                                    'g_adv_loss': g_adv_loss, 
+                            metrics={'d_loss': d_loss,
+                                    'g_total_loss': g_total_loss,
+                                    'g_adv_loss': g_adv_loss,
                                     'g_content_loss': g_content_loss},
                             checkpoint_dir=checkpoint_dir,
                             model_name=model_name)
 
 
             if visualize and epoch % 2 == 0:
+                ema.apply_shadow(generator)
                 test_loader = DataLoader(dataset, batch_size=4, shuffle=True)
                 for low_res, high_res in test_loader:
                     high_res = high_res.to(device)
@@ -183,11 +210,14 @@ def enhanced_training_loop(dataset,
                     except Exception as e:
                         print(f"Visualization error at epoch {epoch}: {e}")
                     break
-            
-            
-        # Save models after training with current num_blocks
+                ema.restore(generator)
+
+
+        # Save final models with EMA weights
+        ema.apply_shadow(generator)
         torch.save(generator.state_dict(), f"generator_{num_blocks}blocks.pth")
         torch.save(discriminator.state_dict(), f"discriminator_{num_blocks}blocks.pth")
+        ema.restore(generator)
         print(f"Models saved for {num_blocks} residual blocks!")
 
         all_losses[num_blocks] = epoch_losses
