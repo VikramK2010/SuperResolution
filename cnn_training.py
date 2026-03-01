@@ -8,16 +8,22 @@ import training_loop
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 
 
-def train_classifier(classifier, 
-                     optimizer, 
-                     criterion, 
-                     data_loader, 
-                     num_epochs, 
-                     device, 
-                     checkpoint_path, 
+def train_classifier(classifier,
+                     optimizer,
+                     criterion,
+                     data_loader,
+                     num_epochs,
+                     device,
+                     checkpoint_path,
                      model_name,
                      low_res_input=True):
-    for epoch in range(num_epochs):
+    start_epoch = training_loop.load_latest_classifier_checkpoint(
+        classifier, optimizer, checkpoint_dir=checkpoint_path, model_name=model_name
+    )
+    if start_epoch >= num_epochs:
+        print(f"  {model_name}: already complete ({num_epochs}/{num_epochs} epochs), skipping training.")
+        return
+    for epoch in range(start_epoch, num_epochs):
         classifier.train()
         running_loss = 0.0
         correct_predictions = 0
@@ -62,16 +68,22 @@ def train_classifier(classifier,
 
 
 
-def train_classifier_w_generator(classifier, 
-                                 generator, 
-                                 optimizer, 
-                                 criterion, 
-                                 data_loader, 
-                                 num_epochs, 
-                                 device, 
-                                 checkpoint_path, 
+def train_classifier_w_generator(classifier,
+                                 generator,
+                                 optimizer,
+                                 criterion,
+                                 data_loader,
+                                 num_epochs,
+                                 device,
+                                 checkpoint_path,
                                  model_name):
-    for epoch in range(num_epochs):
+    start_epoch = training_loop.load_latest_classifier_checkpoint(
+        classifier, optimizer, checkpoint_dir=checkpoint_path, model_name=model_name
+    )
+    if start_epoch >= num_epochs:
+        print(f"  {model_name}: already complete ({num_epochs}/{num_epochs} epochs), skipping training.")
+        return
+    for epoch in range(start_epoch, num_epochs):
         classifier.train()
         running_loss = 0.0
         correct_predictions = 0
