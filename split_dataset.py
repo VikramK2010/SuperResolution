@@ -54,7 +54,9 @@ def split_dataset(color_dir, output_dir, train_ratio=0.6, val_ratio=0.2, test_ra
         link = split_class_dir / f.name
         if link.exists() or link.is_symlink():
             link.unlink()
-        link.symlink_to(f.resolve())
+        # Use relative symlink so it survives directory moves
+        rel_target = os.path.relpath(f.resolve(), split_class_dir.resolve())
+        link.symlink_to(rel_target)
         total_linked[split_name] += 1
 
     for split_name, count in total_linked.items():

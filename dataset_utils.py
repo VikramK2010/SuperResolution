@@ -29,7 +29,7 @@ class SuperResolutionDataset(Dataset):
         # image = plt.imread(self.image_files[idx])
         try:
             image = Image.open(self.image_files[idx])
-            
+            image.load()  # force full read inside try/except (PIL is lazy)
             if image.mode != 'RGB':
                 image = image.convert('RGB')
         except Exception as e:
@@ -37,13 +37,6 @@ class SuperResolutionDataset(Dataset):
             # Create a blank image in case of error
             image = Image.new('RGB', (self.high_res_size, self.high_res_size), (0, 0, 0))
 
-        # Normalize to 0-255 range
-        # image = (image - image.min()) / (image.max() - image.min()) * 255
-
-        # Convert to PIL Image and resize to high resolution
-        # image = transforms.ToPILImage()(image)
-
-        #high_res_img = Image.fromarray(image).convert('L')
         high_res_img = image.resize((self.high_res_size, self.high_res_size), resample=Image.Resampling.BICUBIC)
 
         # Create low resolution version by downsampling
@@ -79,6 +72,7 @@ class SuperResolutionDatasetWithLabels(Dataset):
         # Load file
         try:
             image = Image.open(self.image_files[idx])
+            image.load()  # force full read inside try/except (PIL is lazy)
             if image.mode != 'RGB':
                 image = image.convert('RGB')
         except Exception as e:
@@ -88,13 +82,6 @@ class SuperResolutionDatasetWithLabels(Dataset):
 
         label = self.image_labels[idx]
 
-        # Normalize to 0-255 range
-        # image = (image - image.min()) / (image.max() - image.min()) * 255
-
-        # Convert to PIL Image and resize to high resolution
-        # image = transforms.ToPILImage()(image)
-        
-        #high_res_img = Image.fromarray(image).convert('L')
         high_res_img = image.resize((self.high_res_size, self.high_res_size), resample=Image.Resampling.BICUBIC)
 
         # Create low resolution version by downsampling
