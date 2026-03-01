@@ -3,9 +3,12 @@ torchvision>=0.15.0
 numpy
 scipy
 scikit-learn
+scikit-image
 matplotlib
 Pillow
+lpips
 opencv-python-headless
 pandas
+tqdm
 wandb
 ipywidgets

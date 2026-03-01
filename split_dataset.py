@@ -15,17 +15,20 @@ import os
 import random
 from pathlib import Path
 
+from tqdm import tqdm
+
 
 def split_dataset(color_dir, output_dir, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2):
     color_dir = Path(color_dir)
     output_dir = Path(output_dir)
 
-    splits = {"train": train_ratio, "val": val_ratio, "test": test_ratio}
-    total_linked = {s: 0 for s in splits}
+    total_linked = {"train": 0, "val": 0, "test": 0}
 
     class_dirs = sorted([d for d in color_dir.iterdir() if d.is_dir()])
     print(f"Found {len(class_dirs)} classes in {color_dir}")
 
+    # Collect all files first so tqdm knows the total
+    all_work = []  # list of (file_path, split_name, class_name)
     for class_dir in class_dirs:
         files = sorted([f for f in class_dir.iterdir() if f.is_file()])
         if not files:
@@ -37,22 +40,22 @@ def split_dataset(color_dir, output_dir, train_ratio=0.6, val_ratio=0.2, test_ra
         train_end = int(n * train_ratio)
         val_end = train_end + int(n * val_ratio)
 
-        split_files = {
-            "train": files[:train_end],
-            "val": files[train_end:val_end],
-            "test": files[val_end:],
-        }
+        for f in files[:train_end]:
+            all_work.append((f, "train", class_dir.name))
+        for f in files[train_end:val_end]:
+            all_work.append((f, "val", class_dir.name))
+        for f in files[val_end:]:
+            all_work.append((f, "test", class_dir.name))
 
-        for split_name, sfiles in split_files.items():
-            split_class_dir = output_dir / split_name / class_dir.name
-            split_class_dir.mkdir(parents=True, exist_ok=True)
+    for f, split_name, class_name in tqdm(all_work, desc="Linking images", unit="img"):
+        split_class_dir = output_dir / split_name / class_name
+        split_class_dir.mkdir(parents=True, exist_ok=True)
 
-            for f in sfiles:
-                link = split_class_dir / f.name
-                if link.exists() or link.is_symlink():
-                    link.unlink()
-                link.symlink_to(f.resolve())
-                total_linked[split_name] += 1
+        link = split_class_dir / f.name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(f.resolve())
+        total_linked[split_name] += 1
 
     for split_name, count in total_linked.items():
         print(f"  {split_name}: {count} images")
