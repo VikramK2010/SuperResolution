@@ -6,8 +6,8 @@
 #
 # This script:
 #   1. Installs Python dependencies
-#   2. Clones the PlantVillage dataset from GitHub
-#   3. Splits the data into train/val/test sets
+#   2. Clones PlantVillage color images only (sparse checkout)
+#   3. Creates train/val/test split via symlinks (no file copying)
 # =============================================================================
 
 set -e
@@ -26,21 +26,27 @@ echo "[1/3] Installing Python dependencies..."
 pip install -q -r "$SCRIPT_DIR/requirements.txt"
 echo "  Done."
 
-# --- 2. Download PlantVillage dataset ---
+# --- 2. Download PlantVillage dataset (color images only) ---
 echo ""
 echo "[2/3] Downloading PlantVillage dataset..."
 
 mkdir -p "$DATA_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 
-if [ -d "$DATA_DIR/plantvillage/color_images/train" ]; then
+TRAIN_DIR="$DATA_DIR/plantvillage/color_images/train"
+
+if [ -d "$TRAIN_DIR" ] && [ "$(ls -A "$TRAIN_DIR" 2>/dev/null)" ]; then
     echo "  Dataset already prepared. Skipping download."
 else
     REPO_DIR="$DATA_DIR/PlantVillage-Dataset"
 
     if [ ! -d "$REPO_DIR" ]; then
-        echo "  Cloning PlantVillage dataset from GitHub (this may take a few minutes)..."
-        git clone --depth 1 https://github.com/spMohanty/PlantVillage-Dataset.git "$REPO_DIR"
+        echo "  Cloning PlantVillage dataset (color images only via sparse checkout)..."
+        git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/spMohanty/PlantVillage-Dataset.git "$REPO_DIR"
+        cd "$REPO_DIR"
+        git sparse-checkout set raw/color
+        cd "$SCRIPT_DIR"
     else
         echo "  PlantVillage repo already cloned."
     fi
@@ -53,31 +59,10 @@ else
         exit 1
     fi
 
-    # --- 3. Split data ---
+    # --- 3. Split into train/val/test via symlinks ---
     echo ""
-    echo "[3/3] Splitting data into train/val/test..."
-    python3 -c "
-import sys, shutil
-sys.path.insert(0, '$SCRIPT_DIR')
-from split_data import split_data
-
-# Copy raw color images to a working directory first (split_data uses os.rename)
-import os
-src = '$COLOR_DIR'
-work_dir = '$DATA_DIR/plantvillage/raw/color'
-if not os.path.exists(work_dir):
-    print('  Copying images to working directory...')
-    shutil.copytree(src, work_dir)
-
-split_data(
-    work_dir,
-    '$DATA_DIR/plantvillage/color_images',
-    train_ratio=0.6,
-    val_ratio=0.2,
-    test_ratio=0.2
-)
-print('  Done. Data split into train/val/test.')
-"
+    echo "[3/3] Splitting data into train/val/test (symlinks, no copying)..."
+    python3 "$SCRIPT_DIR/split_dataset.py" --color-dir "$COLOR_DIR"
 fi
 
 echo ""
